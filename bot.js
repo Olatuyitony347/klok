@@ -3,7 +3,7 @@ const { Wallet, ethers } = require("ethers");
 const fs = require("fs");
 const axios = require("axios");
 const colors = require("colors");
-const { loadData, saveJson, getRandomElement, getRandomNumber, sleep, randomDelay } = require("./utils.js");
+const { loadData, saveJson, getRandomElement, getRandomNumber, sleep } = require("./utils.js");
 const { config } = require("./config.js");
 
 const questions = loadData("questions.txt");
@@ -51,13 +51,8 @@ function createApiClient(token) {
       referer: "https://klokapp.ai/",
       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
     },
-    timeout: 30000,
+    timeout: 300000,
   });
-}
-
-async function resetToken() {
-  fs.writeFileSync("token.json", JSON.stringify({}), "utf8");
-  console.log("tokens.json has been reset to {}".green);
 }
 
 async function checkRateLimit(apiClient, accountIndex) {
@@ -139,7 +134,7 @@ async function handleAccount(token, accountIndex) {
   const pointsData = await checkPoints(apiClient, accountIndex);
   const rateLimitInfo = await checkRateLimit(apiClient, accountIndex);
 
-  if (!rateLimitInfo.hasRemaining) return;
+  if (!rateLimitInfo.hasRemaining) return rateLimitInfo.resetTime;
 
   const threads = await getThreads(apiClient);
   let currentThreadId = threads.length > 0 ? threads[0].id : null;
@@ -149,31 +144,11 @@ async function handleAccount(token, accountIndex) {
     if (newThread) currentThreadId = newThread.id;
   }
 
-  return { token, apiClient, currentThreadId, accountIndex };
-}
+  const message = getRandomMessage();
+  log(`Account ${accountIndex + 1}: Sending message: "${message}"`, "info");
+  await sendMessageToThread(apiClient, currentThreadId, message);
 
-function createSiweMessage(address) {
-  return `klokapp.ai wants you to sign in with your Ethereum account:\n${address}\n\nURI: https://klokapp.ai/\nVersion: 1\nChain ID: 1\nNonce: ${ethers.hexlify(ethers.randomBytes(32)).slice(2)}\nIssued At: ${new Date().toISOString()}`;
-}
-
-async function getNewToken(wallet) {
-  const address = wallet.address;
-  const message = createSiweMessage(address);
-  console.log(`📝 Signing Message for ${address}`.blue);
-  const signedMessage = await wallet.signMessage(message);
-
-  try {
-    const response = await axios.post(`${config.API_BASE_URL}/verify`, { signedMessage, message, referral_code: config.REFERRAL_CODE }, { headers: { "Content-Type": "application/json" } });
-    if (response.data.message === "Verification successful") {
-      console.log(`✅ Login ${address} success!`);
-      const token = response.data.session_token;
-      saveJson(address, token, "tokens.json");
-      return token;
-    }
-  } catch (error) {
-    console.error(`❌ Login failed for ${address}: ${error.message}`);
-  }
-  return null;
+  return null; 
 }
 
 async function runBot() {
@@ -181,34 +156,47 @@ async function runBot() {
   const tokens = require("./tokens.json");
   const privateKeys = loadData("privateKeys.txt");
 
-  const accountPromises = privateKeys.map(async (privateKey, index) => {
-    const formattedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
-    const wallet = new ethers.Wallet(formattedKey);
-    let token = tokens[wallet.address] || await getNewToken(wallet);
-
-    if (!token) return null;
-
-    await sleep(getRandomNumber(config.DELAY_START_BOT[0], config.DELAY_START_BOT[1]));
-
-    return await handleAccount(token, index);
-  });
-
-  const accounts = (await Promise.all(accountPromises)).filter(Boolean);
-
   async function processAccounts() {
-    for (const account of accounts) {
-      const message = getRandomMessage();
-      log(`Account ${account.accountIndex + 1}: Sending message: "${message}"`, "info");
-      await sendMessageToThread(account.apiClient, account.currentThreadId, message);
-      await sleep(getRandomInterval() / 1000);
+    const accountPromises = privateKeys.map(async (privateKey, index) => {
+      const formattedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+      const wallet = new ethers.Wallet(formattedKey);
+      let token = tokens[wallet.address] || await getNewToken(wallet);
+
+      if (!token) return null;
+
+      await sleep(getRandomNumber(config.DELAY_START_BOT[0], config.DELAY_START_BOT[1]));
+
+      return await handleAccount(token, index);
+    });
+
+    const resetTimes = (await Promise.all(accountPromises)).filter(time => time !== null);
+    const allAccountsLimited = resetTimes.length === privateKeys.length;
+    const minResetTime = Math.min(...resetTimes, 86400);
+
+    if (allAccountsLimited) {
+      log("All accounts have reached their limits. Waiting for some time before trying again.", "warning");
+
+      if (minResetTime < 1 * 60 * 60 && minResetTime > 0) {
+        log(`Waiting ${Math.ceil(minResetTime / 60)} minutes until rate limit resets...`, "custom");
+        await sleep(minResetTime);
+      } else {
+        log("Waiting 1 hours before trying again...", "custom");
+        await sleep(120);
+      }
+    } else {
+      const nextInterval = getRandomInterval();
+      log(`The next conversation will take place in ${nextInterval / 1000} seconds`, "info");
+      await sleep(nextInterval / 1000);
     }
-    setTimeout(processAccounts, getRandomInterval());
+
+    await processAccounts();
   }
 
-  processAccounts();
+  await processAccounts();
 }
 
 runBot().catch((error) => {
   log(`Bot crashed: ${error}`, "error");
   process.exit(1);
 });
+
