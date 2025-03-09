@@ -3,7 +3,7 @@ const config = {
   MAX_FAILED_ATTEMPTS: 3,
   DELAY_CHAT: [10, 30], //seconds, min: 10s
   REF_CODE: "47278ZKW", //referral code
-  AMOUNT_REF: 100, //number of ref to buff
+  AMOUNT_REF: 20, //number of ref to buff
   DELAY_START_BOT: [1, 15],
   DELAY_REQUEST_API: [5, 15],
 };
